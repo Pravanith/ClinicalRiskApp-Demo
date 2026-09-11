@@ -18,6 +18,8 @@ def apply_transcript():
     }
     for key, value in result.values.items():
         st.session_state['risk_'+key] = value
+    if 'temp_c' in result.values:
+        st.session_state['risk_temp_f'] = result.values['temp_c']*9/5+32
     st.session_state['voice_result'] = result
     st.session_state.pop('analysis_results', None)
     st.session_state['patient_data'] = {}
@@ -42,6 +44,8 @@ def transcribe_recording():
 
 def undo_voice():
     for key,value in st.session_state.pop('voice_previous',{}).items(): st.session_state['risk_'+key] = value
+    c = st.session_state.get('risk_temp_c', 0)
+    st.session_state['risk_temp_f'] = c*9/5+32 if c else None
     st.session_state.pop('voice_result',None)
     st.session_state.pop('analysis_results',None)
     st.session_state['patient_data'] = {}

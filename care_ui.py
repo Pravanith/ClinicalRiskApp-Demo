@@ -10,6 +10,7 @@ import care_store as store
 import care_logic as logic
 import care_ai
 import admission
+import re
 from voice_entry import FIELDS
 from voice_ui import speech_model
 
@@ -45,6 +46,7 @@ def apply_note(eid,text):
     key='care_draft_'+eid
     st.session_state['care_undo_'+eid]=copy.deepcopy(st.session_state[key])
     draft,changes,warnings=logic.intake_from_text(text,st.session_state[key])
+    draft['voice_evidence'] = evidence_rows(text, st.session_state[key], draft)
     st.session_state[key]=draft
     st.session_state['care_extraction_'+eid]=(changes,warnings)
     st.session_state['care_epoch_'+eid]=st.session_state.get('care_epoch_'+eid,0)+1
@@ -124,6 +126,7 @@ def render_hospital(model):
     if data!=current['data']: st.info('You have an unsaved transcript draft. Review and save a section to preserve it.')
     epoch=st.session_state.get('care_epoch_'+eid,0)
     prefix=eid+'_'+str(epoch)+'_'
+    render_overview(data, current)
     tabs=st.tabs(['1 · Intake & voice','2 · Observations','3 · Risks','4 · Medications & AI','5 · Nutrition','6 · Discharge','Timeline'])
     with tabs[0]: render_intake(eid,data,prefix,current)
     with tabs[1]: render_observations(eid,data,prefix)
@@ -150,7 +153,18 @@ def render_intake(eid,data,prefix,current):
     audio_key='care_audio_'+eid
     st.audio_input('Admission or progress note',key=audio_key,on_change=recorded,args=(eid,audio_key))
     if st.session_state.get('care_voice_error_'+eid): st.error(st.session_state['care_voice_error_'+eid])
-    text=st.text_area('Clinical transcript / typed note',key='care_transcript_'+eid,height=120)
+    left, right = st.columns(2)
+    with left:
+        text=st.text_area('Clinical transcript / typed note',key='care_transcript_'+eid,height=240)
+        st.caption('Correct the note here, then fill the draft again. Unmentioned observations remain unchanged.')
+    with right:
+        st.markdown('**Source-linked changes from the last fill**')
+        rows = data.get('voice_evidence', [])
+        if rows:
+            st.dataframe(rows, hide_index=True, use_container_width=True)
+            st.caption('Evidence links explain extraction, not clinical correctness. Review changed values and all surrounding context before saving. These rows describe the last voice fill; later manual edits may differ.')
+        else:
+            st.info('Record a note or paste text and fill the draft to see changes and supporting phrases here.')
     a,b=st.columns(2)
     if a.button('Fill encounter draft from note',key=prefix+'parse'):
         apply_note(eid,text); st.rerun()
@@ -193,7 +207,11 @@ def render_observations(eid,data,prefix):
             value=obs.get(key,cast(0))
             units={'age':'years','height':'cm','sys_bp':'mmHg','dia_bp':'mmHg','hr':'beats/min','resp_rate':'breaths/min','o2_sat':'%','creat':'mg/dL','bun':'mg/dL','potassium':'mmol/L','glucose':'mg/dL','wbc':'10^9/L','hgb':'g/dL','platelets':'10^9/L','lactate':'mmol/L'}
             display=label+(' ('+units[key]+')' if key in units else '')
-            values[key]=cols[index%3].number_input(display,min_value=cast(low),max_value=cast(high),value=cast(value),key=prefix+'obs_'+key)
+            if key == 'temp_c':
+                fahrenheit = cols[index%3].number_input('Temperature °F', min_value=32.0, max_value=113.0, value=float(value)*9/5+32 if value else None, step=0.1, key=prefix+'obs_temp_f', placeholder='Not recorded')
+                values[key] = (fahrenheit-32)*5/9 if fahrenheit is not None else 0.0
+            else:
+                values[key]=cols[index%3].number_input(display,min_value=cast(low),max_value=cast(high),value=cast(value),key=prefix+'obs_'+key)
         values['egfr']=st.number_input('eGFR (mL/min/1.73 m²)',0.0,200.0,float(obs.get('egfr',0)))
         values['gender']=st.selectbox('Sex for bleeding model',['Unknown','Male','Female'],index=['Unknown','Male','Female'].index(obs.get('gender','Unknown')))
         values['w_unit']=st.selectbox('Weight unit',['kg','lbs'],index=1 if obs.get('w_unit')=='lbs' else 0)
@@ -328,3 +346,68 @@ def render_timeline(eid):
     if observations:
         st.markdown('**Observation history**')
         st.dataframe(observations,hide_index=True,use_container_width=True)
+
+
+def render_overview(data, current):
+    with st.expander('Patient overview · current encounter', expanded=True):
+        a, b, c = st.columns(3)
+        a.metric('Encounter', current['stage'])
+        b.metric('Recorded medications', len(data.get('medications', [])))
+        c.metric('Observation fields', len(data.get('observations', {})))
+        st.write('**Presenting complaint:**', data.get('reason') or 'Not recorded')
+        st.write('**Conditions:**', ', '.join(data.get('conditions', [])) or 'None recorded; confirm history')
+        st.write('**Allergies:**', data.get('allergy_status', 'Unknown'), '—', data.get('allergies') or 'No reaction details recorded')
+        pending = []
+        if not data.get('conditions_reviewed'): pending.append('Disease history review')
+        if not data.get('medications_reviewed'): pending.append('Medication history review')
+        if data.get('allergy_status', 'Unknown') == 'Unknown': pending.append('Allergy history')
+        if not data.get('observed_at'): pending.append('Reviewed observation time')
+        st.write('**Pending review:**', ', '.join(pending) or 'These intake checks are recorded; this is not discharge clearance.')
+        st.caption('Current draft is shown. Counts indicate recorded entries, not completeness. Use the sections below to review and save.')
+
+
+def evidence_rows(text, before, after):
+    # Split sentence endings without splitting decimal measurements.
+    phrases = [s.strip() for s in re.split(r'(?<=[.!?])\s+|[;\n]+', text) if s.strip()]
+    parsed = [(s, logic.intake_from_text(s, before)[0]) for s in phrases]
+    rows = []
+
+    def add(label, old, new, supports):
+        sources = [s for s, candidate in parsed if supports(candidate)]
+        rows.append({'Field': label, 'Before': str(old), 'Draft': str(new),
+                     'Review': 'Changed existing value' if old != 'Not recorded' else 'New entry',
+                     'Transcript evidence': '\n'.join(sources) if sources else text,
+                     'Evidence scope': 'Matching phrase' if sources else 'Full note — review context'})
+
+    for key, value in after.get('observations', {}).items():
+        old = before.get('observations', {}).get(key, 'Not recorded')
+        if old != value:
+            add('Temperature °F' if key == 'temp_c' else FIELDS.get(key, (key.replace('_', ' ').title(),))[0],
+                (round(old*9/5+32, 1) if isinstance(old, (float,int)) and old else 'Not recorded') if key == 'temp_c' else old,
+                round(value*9/5+32, 1) if key == 'temp_c' else value,
+                lambda candidate, k=key, v=value: candidate.get('observations', {}).get(k) == v)
+    old_conditions = set(before.get('conditions', []))
+    new_conditions = set(after.get('conditions', []))
+    for condition in sorted(old_conditions ^ new_conditions):
+        present = condition in new_conditions
+        add(condition, 'Present' if condition in old_conditions else 'Not recorded',
+            'Present' if present else 'Explicitly denied in note',
+            lambda candidate, c=condition, p=present: (c in candidate.get('conditions', [])) == p)
+    for key in ('allergies', 'reason'):
+        value = after.get(key, '')
+        old = before.get(key) or 'Not recorded'
+        if value and value != before.get(key):
+            add(key.title(), old, value, lambda candidate, k=key, v=value: candidate.get(k) == v)
+    prior_ids = {m['id'] for m in before.get('medications', [])}
+    for med in after.get('medications', []):
+        if med['id'] not in prior_ids:
+            rows.append({'Field': 'Medication: '+med['name'], 'Before': 'Not recorded',
+                         'Draft': f"{med['dose']} {med['unit']} · {med['frequency']}",
+                         'Review': 'Unreviewed medication candidate',
+                         'Transcript evidence': med.get('source', text),
+                         'Evidence scope': 'Parser medication phrase (normalized)'})
+    if before.get('allergy_status') == 'No known allergies' and after.get('allergy_status') == 'Reported':
+        rows.append({'Field': 'Allergy history conflict', 'Before': 'No known allergies',
+                     'Draft': after.get('allergies', ''), 'Review': 'Resolve conflicting allergy histories',
+                     'Transcript evidence': text, 'Evidence scope': 'Full note — review context'})
+    return rows

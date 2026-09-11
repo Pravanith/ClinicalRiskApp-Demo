@@ -141,7 +141,15 @@ def render_risk_calculator():
                 resp_rate = v4.number_input("Resp Rate (Normal: 12-20)", 0, 60, 0, key="risk_resp_rate", on_change=invalidate_analysis)
                 
                 v5, v6 = st.columns(2)
-                temp_c = v5.number_input("Temp °C (Normal: 36.5-37.5)", 0.0, 45.0, 0.0, step=0.1, key="risk_temp_c", on_change=invalidate_analysis)
+                def temperature_changed():
+                    f = st.session_state.get('risk_temp_f')
+                    st.session_state['risk_temp_c'] = (f-32)*5/9 if f is not None else 0.0
+                    invalidate_analysis()
+                if 'risk_temp_f' not in st.session_state:
+                    c = st.session_state.get('risk_temp_c', 0)
+                    st.session_state['risk_temp_f'] = c*9/5+32 if c else None
+                v5.number_input("Temperature °F", min_value=32.0, max_value=113.0, value=None, step=0.1, key="risk_temp_f", on_change=temperature_changed, placeholder="Not recorded")
+                temp_c = st.session_state.get('risk_temp_c', 0.0)
                 o2_sat = v6.number_input("O2 Sat % (Normal: >95%)", 0, 100, 0, key="risk_o2_sat", on_change=invalidate_analysis)
 
             # --- RIGHT COLUMN: Labs & History ---
@@ -468,11 +476,11 @@ def render_risk_calculator():
         # --- C. DISABILITY / EXPOSURE ---
         # 5. Temperature (High & Low)
         if res.get('temp_c', 0) > 39.0:
-             st.error(f"🚨 HIGH FEVER ({res['temp_c']}°C)")
+             st.error(f"🚨 HIGH FEVER ({res['temp_c']*9/5+32:.1f}°F)")
              st.info("👉 **Action:** Blood Cultures x2. Start Antipyretics (Tylenol). Surface cooling measures.")
              violations += 1
         elif res.get('temp_c', 0) < 35.0 and res.get('temp_c', 0) > 0:
-             st.error(f"🚨 HYPOTHERMIA ({res['temp_c']}°C)")
+             st.error(f"🚨 HYPOTHERMIA ({res['temp_c']*9/5+32:.1f}°F)")
              st.info("👉 **Protocol:** Bear Hugger (Warm air blanket). Warm IV fluids. Monitor cardiac rhythm.")
              violations += 1
              
@@ -818,7 +826,7 @@ def render_dashboard():
               "Alert" if data.get('sepsis_risk', 0) >= 2 else "Normal", delta_color="inverse",
               help="qSOFA Score (0-3). ≥2 indicates high sepsis risk.")
     
-    r4.metric("🌡️ Temp", f"{data.get('temp_c', 37.0):.1f}°C", "Fever" if data.get('temp_c', 37) > 38 else "Normal", delta_color="inverse")
+    r4.metric("🌡️ Temp", f"{data.get('temp_c', 37.0)*9/5+32:.1f}°F", "Fever" if data.get('temp_c', 37) > 38 else "Normal", delta_color="inverse")
 
 # --- MODULE 4: BATCH ANALYSIS (SMART VALIDATION & NEWS-2) ---
 def render_batch_analysis():
